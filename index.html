@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini-Blockchain</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#0f172a; color:#e5e7eb; }
+    .card { background:#111827; color:#e5e7eb; border:1px solid #374151; }
+    .hash, code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace }
+    .tabbar .nav-link { color:#e5e7eb }
+    .tabbar .nav-link.active { color:#fca5a5; background:transparent; border-bottom:2px solid #f87171 }
+    .muted { color:#9ca3af }
+    .tx-item { border-bottom:1px solid #374151; padding:14px 0; }
+    .copy-btn { background:#1f2937; color:#e5e7eb; border:1px solid #374151; padding:4px 10px; border-radius:.375rem }
+    .copy-btn:hover { background:#374151 }
+  </style>
+</head>
+<body class="py-4">
+  <div class="container">
+    <h1 class="mb-4 fw-bold">Mini-Blockchain Dashboard</h1>
+
+    <ul class="nav nav-tabs tabbar mb-4" role="tablist">
+      <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-history">Transaction History</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-tx">New Transaction</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-chain">Transaction List</button></li>
+    </ul>
+
+    <div class="tab-content">
+      <!-- HISTORY (descending) -->
+      <div class="tab-pane fade show active" id="tab-history">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between">
+            <span>Transaction History</span>
+            <button id="btnRefreshHistory" class="btn btn-outline-light btn-sm">Refresh</button>
+          </div>
+          <div class="card-body">
+            <div class="muted mb-3">Total Blocks: <span id="totalBlocks">0</span></div>
+            <div id="historyList"></div>
+            <div id="noTx" class="muted">No transactions yet. Create one in <b>New Transaction</b>.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- NEW TRANSACTION (auto-mines on submit) -->
+      <div class="tab-pane fade" id="tab-tx">
+        <div class="card">
+          <div class="card-header">Create Transaction (auto-mines)</div>
+          <div class="card-body">
+            <div class="row g-3">
+              <div class="col-md-4">
+                <label class="form-label">Sender</label>
+                <input id="sender" class="form-control" value="">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Recipient</label>
+                <input id="recipient" class="form-control" value="">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Amount (₹)</label>
+                <input id="amount" type="number" step="0.01" class="form-control" value="0">
+              </div>
+            </div>
+            <button id="btnCreate" class="btn btn-primary mt-3">Submit Transaction</button>
+            <div id="txMsg" class="mt-3"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CHAIN TABLE (shows sender→receiver list) -->
+      <div class="tab-pane fade" id="tab-chain">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between">
+            <span>Chain (table)</span>
+            <button id="btnRefreshChain" class="btn btn-outline-light btn-sm">Refresh</button>
+          </div>
+          <div class="card-body">
+            <div id="chainTable"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    const API = "http://127.0.0.1:5000"; // match your Flask port
+    const INR = new Intl.NumberFormat('en-IN',{ style:'currency', currency:'INR' });
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+
+    async function getChain(){ const r = await fetch(`${API}/chain`); return r.json(); }
+
+    // HISTORY (descending by block timestamp)
+    function buildHistory(chain){
+      // flatten non-reward tx with block info
+      const items = [];
+      chain.forEach(b => (b.transactions||[]).forEach(t => {
+        if (t.sender === "0") return; // skip mining reward
+        items.push({
+          idx: b.index,
+          ts: b.timestamp,                  // seconds
+          sender: t.sender,
+          recipient: t.recipient,
+          amount: t.amount,
+          hash: b.previous_hash
+        });
+      }));
+      // newest first
+      items.sort((a,b) => b.ts - a.ts);
+
+      $("totalBlocks").textContent = chain.length;
+      const list = $("historyList");
+      list.innerHTML = "";
+
+      if (!items.length){ $("noTx").style.display = "block"; return; }
+      $("noTx").style.display = "none";
+
+      items.forEach(x => {
+        const row = document.createElement("div");
+        row.className = "tx-item";
+        const shortHash = esc(x.hash.slice(0, 24)) + "…";
+        row.innerHTML = `
+          <div class="d-flex">
+            <div class="me-3"><a class="link">#${x.idx}</a></div>
+            <div>
+              <div><b>Sender:</b> ${esc(x.sender)}</div>
+              <div><b>Receiver:</b> ${esc(x.recipient)}</div>
+              <div><b>Amount:</b> ${INR.format(x.amount)}</div>
+              <div><b>Timestamp:</b> ${new Date(x.ts*1000).toLocaleString()}</div>
+              <div class="mt-2 d-flex align-items-center">
+                <span class="hash me-2">${shortHash}</span>
+                <button class="copy-btn btn-sm" data-full="${esc(x.hash)}">Copy Hash</button>
+              </div>
+            </div>
+          </div>
+        `;
+        list.appendChild(row);
+      });
+
+      // copy buttons
+      list.querySelectorAll(".copy-btn").forEach(btn=>{
+        btn.addEventListener("click", async ()=>{
+          try { await navigator.clipboard.writeText(btn.getAttribute("data-full")); btn.textContent="Copied!"; setTimeout(()=>btn.textContent="Copy Hash",1200); }
+          catch { alert("Copy failed"); }
+        });
+      });
+    }
+
+    async function loadHistory(){ const d = await getChain(); buildHistory(d.chain||[]); }
+
+    // NEW TX (auto-mines)
+    $("btnCreate").addEventListener("click", async ()=>{
+      $("txMsg").innerHTML="";
+      const sender=$("sender").value.trim(), recipient=$("recipient").value.trim(), amount=parseFloat($("amount").value);
+      if(!sender || !recipient || Number.isNaN(amount)){ $("txMsg").innerHTML=`<div class="alert alert-danger">Fill all fields correctly.</div>`; return; }
+      const r = await fetch(`${API}/transactions/new`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sender, recipient, amount}) });
+      const body = await r.json().catch(async ()=>({text: await r.text()}));
+      if(r.status===201){
+        $("txMsg").innerHTML = `<div class="alert alert-success">Saved & mined in block #${body.index}</div>`;
+        await loadHistory();
+        await loadChainTable();
+      }else{
+        $("txMsg").innerHTML = `<div class="alert alert-danger">${esc(body.error || body.text || "Failed")}</div>`;
+      }
+    });
+
+    // CHAIN TABLE (shows sender→receiver list)
+    function renderChainTable(chain){
+      let html = `
+        <div class="table-responsive">
+          <table class="table table-dark table-striped align-middle">
+            <thead><tr>
+              <th>#</th><th>Timestamp</th><th>Proof</th><th>Previous Hash</th><th>Transactions</th>
+            </tr></thead><tbody>
+      `;
+      chain.forEach(b=>{
+        const txList = (b.transactions||[]).map(t=>{
+          if(t.sender==="0"){ return `<div class="muted">Reward → <span class="hash">${esc(t.recipient)}</span> (1)</div>`; }
+          return `<div>${esc(t.sender)} → ${esc(t.recipient)} <span class="muted">(${INR.format(t.amount)})</span></div>`;
+        }).join("") || "<em class='muted'>None</em>";
+        html += `<tr>
+          <td>${b.index}</td>
+          <td>${new Date(b.timestamp*1000).toLocaleString()}</td>
+          <td>${b.proof}</td>
+          <td class="hash">${esc(b.previous_hash)}</td>
+          <td>${txList}</td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
+      $("chainTable").innerHTML = html;
+    }
+    async function loadChainTable(){ const d = await getChain(); renderChainTable(d.chain||[]); }
+
+    $("btnRefreshHistory").addEventListener("click", loadHistory);
+    $("btnRefreshChain").addEventListener("click", loadChainTable);
+
+    // initial load
+    loadHistory();
+    loadChainTable();
+  </script>
+</body>
+</html>
