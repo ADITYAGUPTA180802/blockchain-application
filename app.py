@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import hashlib
 import json
 from time import time
@@ -9,10 +10,12 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 
 # ---------------- SQLite Persistence ----------------
-DB_PATH = "blockchain.db"
+# Use DB_PATH env var if provided (e.g., set DB_PATH=/data/blockchain.db on Render with a Disk)
+DB_PATH = os.getenv("DB_PATH", "blockchain.db")
 
 def db():
-    return sqlite3.connect(DB_PATH)
+    # check_same_thread=False allows use across Flask worker threads
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
     con = db(); cur = con.cursor()
@@ -57,8 +60,7 @@ class Blockchain:
         self.current_transactions: list[dict] = []
         self.chain: list[dict] = []
         self.nodes: set[str] = set()
-        # NOTE: we DO NOT create the genesis block here.
-        # Startup will decide: load from DB or create genesis once.
+        # NOTE: do NOT create genesis here. Startup handles load/create.
 
     def new_block(self, proof: int, previous_hash: str | None = None) -> dict:
         block = {
@@ -98,7 +100,7 @@ class Blockchain:
         guess_hash = hashlib.sha256(guess).hexdigest()
         return guess_hash.startswith("0000")
 
-    # (Consensus & nodes: unchanged)
+    # (Consensus & nodes)
     def register_node(self, address: str) -> None:
         parsed = urlparse(address)
         if parsed.scheme and parsed.netloc:
@@ -140,16 +142,14 @@ class Blockchain:
             return True
         return False
 
-# -------- Startup order: init DB, load or create genesis ------
+# -------- Startup: init DB, load or create genesis ------
 init_db()
 blockchain = Blockchain()
 _db_chain = load_chain_from_db()
 if _db_chain:
-    # Use persisted chain; no new genesis is created
     blockchain.chain = _db_chain
 else:
-    # First run: create and persist genesis block
-    blockchain.new_block(proof=100, previous_hash="1")
+    blockchain.new_block(proof=100, previous_hash="1")  # create & persist genesis once
 
 # ---------------- Routes ----------------
 @app.route("/")
@@ -166,7 +166,7 @@ def new_transaction_route():
     blockchain.new_transaction(values["sender"], values["recipient"], float(values["amount"]))
     last_proof = blockchain.last_block["proof"]
     proof = blockchain.proof_of_work(last_proof)
-    blockchain.new_transaction(sender="0", recipient=node_identifier, amount=1)
+    blockchain.new_transaction(sender="0", recipient=node_identifier, amount=1)  # mining reward
     block = blockchain.new_block(proof)
 
     return jsonify({
@@ -217,6 +217,6 @@ def consensus():
 
 # ---------------- Run ----------------
 if __name__ == "__main__":
-    import sys
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Use Render's assigned port if present
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
