@@ -19,7 +19,7 @@
 </head>
 <body class="py-4">
   <div class="container">
-    <h1 class="mb-4 fw-bold">Mini-Blockchain Dashboard</h1>
+    <h1 class="mb-4 fw-bold">Blockchain Dashboard</h1>
 
     <ul class="nav nav-tabs tabbar mb-4" role="tablist">
       <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-history">Transaction History</button></li>
@@ -68,7 +68,6 @@
         </div>
       </div>
 
-      <!-- CHAIN TABLE (shows sender→receiver list) -->
       <div class="tab-pane fade" id="tab-chain">
         <div class="card">
           <div class="card-header d-flex justify-content-between">
@@ -92,22 +91,21 @@
 
     async function getChain(){ const r = await fetch(`${API}/chain`); return r.json(); }
 
-    // HISTORY (descending by block timestamp)
+
     function buildHistory(chain){
-      // flatten non-reward tx with block info
+
       const items = [];
       chain.forEach(b => (b.transactions||[]).forEach(t => {
-        if (t.sender === "0") return; // skip mining reward
+        if (t.sender === "0") return;
         items.push({
           idx: b.index,
-          ts: b.timestamp,                  // seconds
+          ts: b.timestamp,                  
           sender: t.sender,
           recipient: t.recipient,
           amount: t.amount,
           hash: b.previous_hash
         });
       }));
-      // newest first
       items.sort((a,b) => b.ts - a.ts);
 
       $("totalBlocks").textContent = chain.length;
@@ -150,7 +148,7 @@
 
     async function loadHistory(){ const d = await getChain(); buildHistory(d.chain||[]); }
 
-    // NEW TX (auto-mines)
+
     $("btnCreate").addEventListener("click", async ()=>{
       $("txMsg").innerHTML="";
       const sender=$("sender").value.trim(), recipient=$("recipient").value.trim(), amount=parseFloat($("amount").value);
@@ -166,7 +164,7 @@
       }
     });
 
-    // CHAIN TABLE (shows sender→receiver list)
+
     function renderChainTable(chain){
       let html = `
         <div class="table-responsive">
