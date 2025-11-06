@@ -81,122 +81,152 @@
       </div>
     </div>
   </div>
+ <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  // Use the current site origin so it works on localhost and Render
+  const API = window.location.origin.replace(/\/+$/, "");
+  const INR = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" });
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>\"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script>
-    const API = "http://127.0.0.1:5000"; // match your Flask port
-    const INR = new Intl.NumberFormat('en-IN',{ style:'currency', currency:'INR' });
-    const $ = id => document.getElementById(id);
-    const esc = s => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  async function getChain() {
+    const r = await fetch(`${API}/chain`, { cache: "no-store" });
+    if (!r.ok) throw new Error(`GET /chain ${r.status}`);
+    return r.json();
+  }
 
-    async function getChain(){ const r = await fetch(`${API}/chain`); return r.json(); }
+  function buildHistory(chain) {
+    const items = [];
+    chain.forEach(b => (b.transactions || []).forEach(t => {
+      if (t.sender === "0") return;          // skip reward in history
+      items.push({
+        idx: b.index,
+        ts: b.timestamp,
+        sender: t.sender,
+        recipient: t.recipient,
+        amount: t.amount,
+        hash: b.previous_hash
+      });
+    }));
+    items.sort((a,b) => b.ts - a.ts);
 
+    $("totalBlocks").textContent = chain.length;
+    const list = $("historyList");
+    list.innerHTML = "";
 
-    function buildHistory(chain){
+    if (!items.length) { $("noTx").style.display = "block"; return; }
+    $("noTx").style.display = "none";
 
-      const items = [];
-      chain.forEach(b => (b.transactions||[]).forEach(t => {
-        if (t.sender === "0") return;
-        items.push({
-          idx: b.index,
-          ts: b.timestamp,                  
-          sender: t.sender,
-          recipient: t.recipient,
-          amount: t.amount,
-          hash: b.previous_hash
-        });
-      }));
-      items.sort((a,b) => b.ts - a.ts);
-
-      $("totalBlocks").textContent = chain.length;
-      const list = $("historyList");
-      list.innerHTML = "";
-
-      if (!items.length){ $("noTx").style.display = "block"; return; }
-      $("noTx").style.display = "none";
-
-      items.forEach(x => {
-        const row = document.createElement("div");
-        row.className = "tx-item";
-        const shortHash = esc(x.hash.slice(0, 24)) + "…";
-        row.innerHTML = `
-          <div class="d-flex">
-            <div class="me-3"><a class="link">#${x.idx}</a></div>
-            <div>
-              <div><b>Sender:</b> ${esc(x.sender)}</div>
-              <div><b>Receiver:</b> ${esc(x.recipient)}</div>
-              <div><b>Amount:</b> ${INR.format(x.amount)}</div>
-              <div><b>Timestamp:</b> ${new Date(x.ts*1000).toLocaleString()}</div>
-              <div class="mt-2 d-flex align-items-center">
-                <span class="hash me-2">${shortHash}</span>
-                <button class="copy-btn btn-sm" data-full="${esc(x.hash)}">Copy Hash</button>
-              </div>
+    items.forEach(x => {
+      const row = document.createElement("div");
+      row.className = "tx-item";
+      const shortHash = esc((x.hash || "").slice(0, 24)) + "…";
+      row.innerHTML = `
+        <div class="d-flex">
+          <div class="me-3"><a class="link">#${x.idx}</a></div>
+          <div>
+            <div><b>Sender:</b> ${esc(x.sender)}</div>
+            <div><b>Receiver:</b> ${esc(x.recipient)}</div>
+            <div><b>Amount:</b> ${INR.format(x.amount)}</div>
+            <div><b>Timestamp:</b> ${new Date(x.ts*1000).toLocaleString()}</div>
+            <div class="mt-2 d-flex align-items-center">
+              <span class="hash me-2">${shortHash}</span>
+              <button class="copy-btn btn-sm" data-full="${esc(x.hash || "")}">Copy Hash</button>
             </div>
           </div>
-        `;
-        list.appendChild(row);
-      });
+        </div>`;
+      list.appendChild(row);
+    });
 
-      // copy buttons
-      list.querySelectorAll(".copy-btn").forEach(btn=>{
-        btn.addEventListener("click", async ()=>{
-          try { await navigator.clipboard.writeText(btn.getAttribute("data-full")); btn.textContent="Copied!"; setTimeout(()=>btn.textContent="Copy Hash",1200); }
-          catch { alert("Copy failed"); }
-        });
+    list.querySelectorAll(".copy-btn").forEach(btn=>{
+      btn.addEventListener("click", async ()=>{
+        try {
+          await navigator.clipboard.writeText(btn.getAttribute("data-full"));
+          btn.textContent = "Copied!";
+          setTimeout(()=> btn.textContent = "Copy Hash", 1200);
+        } catch { alert("Copy failed"); }
       });
+    });
+  }
+
+  async function loadHistory() {
+    try { const d = await getChain(); buildHistory(d.chain || []); }
+    catch (e) { console.error(e); }
+  }
+
+  function renderChainTable(chain){
+    let html = `
+      <div class="table-responsive">
+        <table class="table table-dark table-striped align-middle">
+          <thead><tr>
+            <th>#</th><th>Timestamp</th><th>Proof</th><th>Previous Hash</th><th>Transactions</th>
+          </tr></thead><tbody>`;
+    chain.forEach(b=>{
+      const txList = (b.transactions||[]).map(t=>{
+        if (t.sender === "0") return `<div class="muted">Reward → <span class="hash">${esc(t.recipient)}</span> (1)</div>`;
+        return `<div>${esc(t.sender)} → ${esc(t.recipient)} <span class="muted">(${INR.format(t.amount)})</span></div>`;
+      }).join("") || "<em class='muted'>None</em>";
+      html += `<tr>
+        <td>${b.index}</td>
+        <td>${new Date(b.timestamp*1000).toLocaleString()}</td>
+        <td>${b.proof}</td>
+        <td class="hash">${esc(b.previous_hash || "")}</td>
+        <td>${txList}</td>
+      </tr>`;
+    });
+    html += `</tbody></table></div>`;
+    $("chainTable").innerHTML = html;
+  }
+
+  async function loadChainTable(){
+    try { const d = await getChain(); renderChainTable(d.chain || []); }
+    catch (e) { console.error(e); }
+  }
+
+  $("btnRefreshHistory").addEventListener("click", loadHistory);
+  $("btnRefreshChain").addEventListener("click", loadChainTable);
+
+  // Submit transaction (auto-mines)
+  $("btnCreate").addEventListener("click", async ()=>{
+    $("txMsg").innerHTML = "";
+    const sender = $("sender").value.trim();
+    const recipient = $("recipient").value.trim();
+    const amount = parseFloat($("amount").value);
+
+    if (!sender || !recipient || Number.isNaN(amount)) {
+      $("txMsg").innerHTML = `<div class="alert alert-danger">Fill all fields correctly.</div>`;
+      return;
     }
 
-    async function loadHistory(){ const d = await getChain(); buildHistory(d.chain||[]); }
+    try {
+      const r = await fetch(`${API}/transactions/new`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sender, recipient, amount })
+      });
 
+      const body = await r.json().catch(async ()=>({ text: await r.text() }));
 
-    $("btnCreate").addEventListener("click", async ()=>{
-      $("txMsg").innerHTML="";
-      const sender=$("sender").value.trim(), recipient=$("recipient").value.trim(), amount=parseFloat($("amount").value);
-      if(!sender || !recipient || Number.isNaN(amount)){ $("txMsg").innerHTML=`<div class="alert alert-danger">Fill all fields correctly.</div>`; return; }
-      const r = await fetch(`${API}/transactions/new`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sender, recipient, amount}) });
-      const body = await r.json().catch(async ()=>({text: await r.text()}));
-      if(r.status===201){
+      if (r.status === 201) {
         $("txMsg").innerHTML = `<div class="alert alert-success">Saved & mined in block #${body.index}</div>`;
         await loadHistory();
         await loadChainTable();
-      }else{
+        // optional: clear inputs
+        // $("sender").value = ""; $("recipient").value = ""; $("amount").value = "0";
+      } else {
         $("txMsg").innerHTML = `<div class="alert alert-danger">${esc(body.error || body.text || "Failed")}</div>`;
       }
-    });
-
-
-    function renderChainTable(chain){
-      let html = `
-        <div class="table-responsive">
-          <table class="table table-dark table-striped align-middle">
-            <thead><tr>
-              <th>#</th><th>Timestamp</th><th>Proof</th><th>Previous Hash</th><th>Transactions</th>
-            </tr></thead><tbody>
-      `;
-      chain.forEach(b=>{
-        const txList = (b.transactions||[]).map(t=>{
-          if(t.sender==="0"){ return `<div class="muted">Reward → <span class="hash">${esc(t.recipient)}</span> (1)</div>`; }
-          return `<div>${esc(t.sender)} → ${esc(t.recipient)} <span class="muted">(${INR.format(t.amount)})</span></div>`;
-        }).join("") || "<em class='muted'>None</em>";
-        html += `<tr>
-          <td>${b.index}</td>
-          <td>${new Date(b.timestamp*1000).toLocaleString()}</td>
-          <td>${b.proof}</td>
-          <td class="hash">${esc(b.previous_hash)}</td>
-          <td>${txList}</td>
-        </tr>`;
-      });
-      html += `</tbody></table></div>`;
-      $("chainTable").innerHTML = html;
+    } catch (err) {
+      console.error(err);
+      $("txMsg").innerHTML = `<div class="alert alert-danger">Network error. Check console.</div>`;
     }
-    async function loadChainTable(){ const d = await getChain(); renderChainTable(d.chain||[]); }
+  });
 
-    $("btnRefreshHistory").addEventListener("click", loadHistory);
-    $("btnRefreshChain").addEventListener("click", loadChainTable);
+  // initial load
+  loadHistory();
+  loadChainTable();
+</script>
 
-    // initial load
-    loadHistory();
-    loadChainTable();
-  </script>
 </body>
 </html>
+
