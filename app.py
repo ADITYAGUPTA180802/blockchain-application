@@ -4,31 +4,63 @@ import json
 from time import time
 from uuid import uuid4
 from urllib.parse import urlparse
-
+import sqlite3
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 
-# ---------------- Flask app must exist before using @app.route ----------------
-app = Flask(__name__)
+# ---------------- SQLite Persistence ----------------
+DB_PATH = "blockchain.db"
 
-# Unique id for this node (used as the mining reward recipient)
+def db():
+    return sqlite3.connect(DB_PATH)
+
+def init_db():
+    con = db(); cur = con.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS blocks(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idx INTEGER, ts REAL, proof INTEGER, previous_hash TEXT
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS txs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        block_idx INTEGER, sender TEXT, recipient TEXT, amount REAL
+    )""")
+    con.commit(); con.close()
+
+def save_block(block: dict):
+    con = db(); cur = con.cursor()
+    cur.execute("INSERT INTO blocks(idx, ts, proof, previous_hash) VALUES(?,?,?,?)",
+                (block["index"], block["timestamp"], block["proof"], block["previous_hash"]))
+    for t in block["transactions"]:
+        cur.execute("INSERT INTO txs(block_idx, sender, recipient, amount) VALUES(?,?,?,?)",
+                    (block["index"], t["sender"], t["recipient"], t["amount"]))
+    con.commit(); con.close()
+
+def load_chain_from_db() -> list[dict]:
+    con = db(); cur = con.cursor()
+    cur.execute("SELECT idx, ts, proof, previous_hash FROM blocks ORDER BY idx ASC")
+    rows = cur.fetchall()
+    chain: list[dict] = []
+    for idx, ts, proof, prev in rows:
+        cur.execute("SELECT sender, recipient, amount FROM txs WHERE block_idx=? ORDER BY id ASC", (idx,))
+        txs = [{"sender": s, "recipient": r, "amount": a} for (s, r, a) in cur.fetchall()]
+        chain.append({"index": idx, "timestamp": ts, "transactions": txs, "proof": proof, "previous_hash": prev})
+    con.close()
+    return chain
+
+# ---------------- Flask ----------------
+app = Flask(__name__)
 node_identifier = str(uuid4()).replace("-", "")
 
-# ----------------------------- Blockchain ------------------------------------
+# ---------------- Blockchain ----------------
 class Blockchain:
     def __init__(self):
-        self.current_transactions: list[dict] = []   # pending txns
-        self.chain: list[dict] = []                  # list of blocks
-        self.nodes: set[str] = set()                 # peer node URLs
+        self.current_transactions: list[dict] = []
+        self.chain: list[dict] = []
+        self.nodes: set[str] = set()
+        # NOTE: we DO NOT create the genesis block here.
+        # Startup will decide: load from DB or create genesis once.
 
-        # Genesis block
-        self.new_block(proof=100, previous_hash="1")
-
-    # -------- Blocks & Transactions --------
     def new_block(self, proof: int, previous_hash: str | None = None) -> dict:
-        """
-        Create a new block and add it to the chain.
-        """
         block = {
             "index": len(self.chain) + 1,
             "timestamp": time(),
@@ -36,22 +68,14 @@ class Blockchain:
             "proof": proof,
             "previous_hash": previous_hash or self.hash(self.chain[-1]),
         }
-        # reset pending transactions
         self.current_transactions = []
         self.chain.append(block)
+        save_block(block)  # persist every block
         return block
 
     def new_transaction(self, sender: str, recipient: str, amount: float) -> int:
-        """
-        Add a new transaction to the list of pending transactions.
-        Returns the index of the block that will hold this transaction.
-        """
-        self.current_transactions.append({
-            "sender": sender,
-            "recipient": recipient,
-            "amount": amount,
-        })
-        return self.last_block["index"] + 1
+        self.current_transactions.append({"sender": sender, "recipient": recipient, "amount": amount})
+        return (self.last_block["index"] + 1) if self.chain else 1
 
     @property
     def last_block(self) -> dict:
@@ -59,18 +83,10 @@ class Blockchain:
 
     @staticmethod
     def hash(block: dict) -> str:
-        """
-        Create a SHA-256 hash of a block (keys sorted for consistency).
-        """
         block_string = json.dumps(block, sort_keys=True).encode()
         return hashlib.sha256(block_string).hexdigest()
 
-    # -------- Proof of Work --------
     def proof_of_work(self, last_proof: int) -> int:
-        """
-        Simple PoW:
-        Find a number 'proof' such that sha256(f"{last_proof}{proof}") begins with '0000'.
-        """
         proof = 0
         while not self.valid_proof(last_proof, proof):
             proof += 1
@@ -80,13 +96,10 @@ class Blockchain:
     def valid_proof(last_proof: int, proof: int) -> bool:
         guess = f"{last_proof}{proof}".encode()
         guess_hash = hashlib.sha256(guess).hexdigest()
-        return guess_hash.startswith("0000")  # difficulty
+        return guess_hash.startswith("0000")
 
-    # -------- Networking & Consensus --------
+    # (Consensus & nodes: unchanged)
     def register_node(self, address: str) -> None:
-        """
-        Add a new node by URL. Accepts 'http://host:port' or 'host:port'.
-        """
         parsed = urlparse(address)
         if parsed.scheme and parsed.netloc:
             self.nodes.add(f"{parsed.scheme}://{parsed.netloc}")
@@ -94,42 +107,21 @@ class Blockchain:
             self.nodes.add(f"http://{address}")
 
     def valid_chain(self, chain: list[dict]) -> bool:
-        """
-        A chain is valid if:
-        - each block's previous_hash matches the SHA-256 of the previous block
-        - each block's proof satisfies PoW with previous block's proof
-        """
         if not chain:
             return False
-
         last_block = chain[0]
-        current_index = 1
-
-        while current_index < len(chain):
-            block = chain[current_index]
-
-            # previous hash must match
+        for block in chain[1:]:
             if block["previous_hash"] != self.hash(last_block):
                 return False
-
-            # proof must be valid
             if not self.valid_proof(last_block["proof"], block["proof"]):
                 return False
-
             last_block = block
-            current_index += 1
-
         return True
 
     def resolve_conflicts(self) -> bool:
-        """
-        Consensus: replace our chain if a neighbor has a longer valid one.
-        Returns True if our chain was replaced.
-        """
         neighbors = self.nodes
         new_chain: list[dict] | None = None
         max_length = len(self.chain)
-
         for node in neighbors:
             try:
                 response = requests.get(f"{node}/chain", timeout=5)
@@ -137,28 +129,31 @@ class Blockchain:
                 continue
             if response.status_code != 200:
                 continue
-
             data = response.json()
             length = data.get("length")
             chain = data.get("chain")
-
             if length and chain and length > max_length and self.valid_chain(chain):
                 max_length = length
                 new_chain = chain
-
         if new_chain:
             self.chain = new_chain
             return True
         return False
 
-
-# Global blockchain instance
+# -------- Startup order: init DB, load or create genesis ------
+init_db()
 blockchain = Blockchain()
+_db_chain = load_chain_from_db()
+if _db_chain:
+    # Use persisted chain; no new genesis is created
+    blockchain.chain = _db_chain
+else:
+    # First run: create and persist genesis block
+    blockchain.new_block(proof=100, previous_hash="1")
 
-# --------------------------------- Routes ------------------------------------
+# ---------------- Routes ----------------
 @app.route("/")
 def home():
-    # Optional: simple viewer page if you created index.html
     return send_from_directory(".", "index.html")
 
 @app.route("/transactions/new", methods=["POST"])
@@ -168,16 +163,10 @@ def new_transaction_route():
     if not all(k in values for k in required):
         return jsonify({"error": "Missing values. Required: sender, recipient, amount"}), 400
 
-    # 1) Add the transaction
-    blockchain.new_transaction(values["sender"], values["recipient"], values["amount"])
-
-    # 2) Auto-mine: run PoW, add reward, create block
+    blockchain.new_transaction(values["sender"], values["recipient"], float(values["amount"]))
     last_proof = blockchain.last_block["proof"]
     proof = blockchain.proof_of_work(last_proof)
-
-    # reward the miner
     blockchain.new_transaction(sender="0", recipient=node_identifier, amount=1)
-
     block = blockchain.new_block(proof)
 
     return jsonify({
@@ -193,10 +182,7 @@ def new_transaction_route():
 def mine_route():
     last_proof = blockchain.last_block["proof"]
     proof = blockchain.proof_of_work(last_proof)
-
-    # reward the miner
     blockchain.new_transaction(sender="0", recipient=node_identifier, amount=1)
-
     block = blockchain.new_block(proof)
     return jsonify({
         "message": "New Block Forged",
@@ -204,7 +190,7 @@ def mine_route():
         "transactions": block["transactions"],
         "proof": block["proof"],
         "previous_hash": block["previous_hash"],
-        "miner": node_identifier,
+        "miner": node_identifier
     }), 200
 
 @app.route("/chain", methods=["GET"])
@@ -217,10 +203,8 @@ def register_nodes():
     nodes = values.get("nodes")
     if nodes is None or not isinstance(nodes, list) or not nodes:
         return jsonify({"error": "Please supply a non-empty list of node URLs in 'nodes'."}), 400
-
     for node in nodes:
         blockchain.register_node(node)
-
     return jsonify({"message": "New nodes have been added", "total_nodes": list(blockchain.nodes)}), 201
 
 @app.route("/nodes/resolve", methods=["GET"])
@@ -231,7 +215,7 @@ def consensus():
     else:
         return jsonify({"message": "Our chain is authoritative", "chain": blockchain.chain}), 200
 
-# --------------------------------- Run ---------------------------------------
+# ---------------- Run ----------------
 if __name__ == "__main__":
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
